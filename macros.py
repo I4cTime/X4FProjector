@@ -3,6 +3,7 @@
 import copy
 import re
 import logging
+
 from lxml import etree
 
 
@@ -171,59 +172,63 @@ class MacroDB:
         path: path to game .xml file.
               E.g.: assets/props/Engine/macros/engine_(...)_macro.xml
         """
-
+        skipper = 0
         with self.floader.open_file(path) as macro_file:
-            tree = etree.parse(macro_file)
+            try:
+                tree = etree.parse(macro_file)
+            except Exception as e:
+                skipper = 1
+                LOG.warning('Failed to parse file %s', path)
         found_macro = False
+        if skipper == 0:
+            for macro_node in tree.xpath('./macro[@name][@class]'):
+                found_macro = True
+                macro_name = macro_node.get('name')
+                macro_type = macro_node.get('class')
+                properties = {}
 
-        for macro_node in tree.xpath('./macro[@name][@class]'):
-            found_macro = True
-            macro_name = macro_node.get('name')
-            macro_type = macro_node.get('class')
-            properties = {}
+                prop_nodes = macro_node.xpath('./properties')
+                if len(prop_nodes) > 1:
+                    LOG.error('Failed to load macro properties from %s: too '
+                              'many <properties> nodes', path)
+                elif prop_nodes:
+                    # parse properties
+                    properties = \
+                        self.macro_parser(macro_name, macro_type, prop_nodes[0])
 
-            prop_nodes = macro_node.xpath('./properties')
-            if len(prop_nodes) > 1:
-                LOG.error('Failed to load macro properties from %s: too '
-                          'many <properties> nodes', path)
-            elif prop_nodes:
-                # parse properties
-                properties = \
-                    self.macro_parser(macro_name, macro_type, prop_nodes[0])
+                comp_nodes = macro_node.xpath('./component')
+                if len(comp_nodes) > 1:
+                    LOG.error('Failed to load component properties from %s: '
+                              'too many <properties> nodes', path)
+                elif comp_nodes:
+                    comp_name = comp_nodes[0].get('ref')
 
-            comp_nodes = macro_node.xpath('./component')
-            if len(comp_nodes) > 1:
-                LOG.error('Failed to load component properties from %s: '
-                          'too many <properties> nodes', path)
-            elif comp_nodes:
-                comp_name = comp_nodes[0].get('ref')
+                    # parse properties from the component
+                    comp_props = self.load_component_properties(comp_name)
+                    properties.update(comp_props)
 
-                # parse properties from the component
-                comp_props = self.load_component_properties(comp_name)
-                properties.update(comp_props)
+                macro = Macro(macro_name, macro_type, properties)
 
-            macro = Macro(macro_name, macro_type, properties)
+                connections_xpath = './connections/connection[@ref]'
+                for conn_node in macro_node.xpath(connections_xpath):
+                    conn_ref = conn_node.get('ref')
 
-            connections_xpath = './connections/connection[@ref]'
-            for conn_node in macro_node.xpath(connections_xpath):
-                conn_ref = conn_node.get('ref')
+                    for conn_m_node in conn_node.xpath('./macro[@ref]'):
+                        macro_ref = conn_m_node.get('ref')
+                        if macro_ref not in self.macros:
+                            self.dependencies.add(macro_ref)
 
-                for conn_m_node in conn_node.xpath('./macro[@ref]'):
-                    macro_ref = conn_m_node.get('ref')
-                    if macro_ref not in self.macros:
-                        self.dependencies.add(macro_ref)
+                        macro.add_connection(conn_ref, macro_ref)
 
-                    macro.add_connection(conn_ref, macro_ref)
+                # save macro, remove dependency if it exists
+                self.macros[macro_name] = macro
+                self.dependencies.discard(macro_name)
 
-            # save macro, remove dependency if it exists
-            self.macros[macro_name] = macro
-            self.dependencies.discard(macro_name)
+                t_macros = self.macros_by_type.setdefault(macro_type, [])
+                t_macros.append(macro_name)
 
-            t_macros = self.macros_by_type.setdefault(macro_type, [])
-            t_macros.append(macro_name)
-
-        if not found_macro:
-            LOG.warning('No macros found in file %s', path)
+            if not found_macro:
+                LOG.warning('No macros found in file %s', path)
 
     def _resolve_step(self):
         """One step in the dependency resolution algorithm.
